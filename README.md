@@ -2,7 +2,7 @@
 ## PAMIL: Prototype Attention-based Multiple Instance Learning for Whole Slide Image Classification
 MICCAI 2024
 
-![Overview of PAMIL](.\Image\overview.png)
+![Overview of PAMIL](./Image/overview.png)
 
 **Abstract.** Digital pathology images are not only crucial for diagnosing cancer but also play a significant role in treatment planning, and research into disease mechanisms. The multiple instance learning (MIL) technique provides an effective weakly-supervised methodology for analyzing gigapixel Whole Slide Image~(WSI). Recent advancements in MIL approaches have predominantly focused on predicting a singular diagnostic label for each WSI, simultaneously enhancing interpretability via attention mechanisms.
 However, given the heterogeneity of tumors, each WSI may contain multiple histotypes. Also, the generated attention maps often fail to offer a comprehensible explanation of the underlying reasoning process.
