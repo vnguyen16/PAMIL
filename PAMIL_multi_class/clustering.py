@@ -13,7 +13,7 @@ from utils.utils import *
 from datasets.dataset_generic_npy import get_split_loader, Generic_MIL_Dataset
 from datasets.dataset_generic_h5 import Generic_H5_MIL_Dataset
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" # changed from 3
 
 # testing = args.testing, weighted = args.weighted_sample
 
@@ -231,11 +231,17 @@ def run_kmeans(x, nmb_clusters, verbose=False, seed=None):
 
     clus.niter = 20
     clus.max_points_per_centroid = 10000000
-    res = faiss.StandardGpuResources()
-    flat_config = faiss.GpuIndexFlatConfig()
-    flat_config.useFloat16 = False
-    flat_config.device = 0
-    index = faiss.GpuIndexFlatL2(res, d, flat_config)
+
+    # OG faiss gpu ------------------------------
+    # res = faiss.StandardGpuResources()
+    # flat_config = faiss.GpuIndexFlatConfig()
+    # flat_config.useFloat16 = False
+    # flat_config.device = 0
+    # index = faiss.GpuIndexFlatL2(res, d, flat_config)
+    # ------------------------------------------
+    # faiss (CPU)
+    index = faiss.IndexFlatL2(d)
+
 
     # perform the training
     clus.train(x, index)
@@ -326,6 +332,13 @@ def main(args):
         args.n_classes = len(set(default_labels.values()))
         if args.model_type in ['PAMIL']:
             dataset = _build_dataset('dataset_csv/lung_subtyping_npy.csv', '1_512', default_labels)
+    
+    elif args.task == 'fa_pt':
+        default_labels = {'FA': 0, 'PT': 1}
+        args.n_classes = len(set(default_labels.values()))
+        if args.model_type in ['PAMIL']:
+            dataset = _build_dataset('dataset_csv/hist_custom.csv', '0_1024', default_labels)
+    
     else:
         raise NotImplementedError
 
