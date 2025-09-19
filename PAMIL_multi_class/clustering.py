@@ -11,6 +11,7 @@ from sklearn.cluster import KMeans
 
 from utils.utils import *
 from datasets.dataset_generic_npy import get_split_loader, Generic_MIL_Dataset
+from datasets.dataset_generic_h5 import Generic_H5_MIL_Dataset
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
@@ -41,13 +42,36 @@ parser.add_argument('--fea_dim', type=int, default=1024,
                      help='the original dimensions of patch embedding')
 parser.add_argument('--k_start', type=int, default=-1, help='start fold (default: -1, last fold)')
 parser.add_argument('--k_end', type=int, default=-1, help='end fold (default: -1, first fold)')
-parser.add_argument('--subtyping', action='store_true', default=False, 
+parser.add_argument('--subtyping', action='store_true', default=False,
                      help='subtyping problem')
 
 # special for Clustering
 parser.add_argument('--num_clusters', type=int, default=8,
                     help='the number of clusters')
 parser.add_argument('--num_protos', type=int, default=10, help='the number of protos')
+
+# dataset configuration -------------------------------------------------------
+parser.add_argument('--csv_path', type=str, default=None,
+                    help='Optional override for the slide-level metadata CSV.')
+parser.add_argument('--data_mag', type=str, default=None,
+                    help='Override the magnification suffix used when locating feature files.')
+parser.add_argument('--label_map', nargs='+', default=None,
+                    help='Override the default label mapping using KEY=VALUE pairs (e.g. FA=0 PT=1).')
+parser.add_argument('--feature_format', choices=['npy', 'h5'], default='npy',
+                    help='Storage backend for slide-level feature files.')
+parser.add_argument('--h5_feature_key', nargs='+', default=None,
+                    help='Dataset keys that contain patch embeddings inside each HDF5 file.')
+parser.add_argument('--h5_coord_key', nargs='+', default=None,
+                    help='Dataset keys that contain patch coordinates inside each HDF5 file.')
+parser.add_argument('--h5_inst_key', nargs='+', default=None,
+                    help='Dataset keys that contain instance labels inside each HDF5 file. '
+                         "Use 'none' to disable instance label loading.")
+parser.add_argument('--h5_file_suffix', type=str, default='',
+                    help='Additional string inserted between the slide identifier and the file extension.')
+parser.add_argument('--h5_file_ext', type=str, default='.h5',
+                    help='File extension used for HDF5 feature files.')
+parser.add_argument('--h5_keep_dtype', action='store_true', default=False,
+                    help='Preserve the on-disk dtype instead of converting features to float32.')
 
 args = parser.parse_args()
 device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -80,6 +104,75 @@ def seed_torch(seed=42):
         torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
+
+
+def _parse_label_map(pairs):
+    if not pairs:
+        return None
+    mapping = {}
+    for pair in pairs:
+        if '=' not in pair:
+            raise ValueError(f"Invalid label_map entry '{pair}'. Expected KEY=VALUE format.")
+        key, value = pair.split('=', 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            raise ValueError(f"Invalid label_map entry '{pair}'.")
+        mapping[key] = int(value)
+    return mapping
+
+
+def _parse_h5_keys(values, *, allow_empty=False):
+    if values is None:
+        return None
+    if allow_empty and len(values) == 1 and values[0].lower() == 'none':
+        return tuple()
+    return tuple(values)
+
+
+def _resolve_dataset_class():
+    if args.feature_format == 'h5':
+        return Generic_H5_MIL_Dataset
+    return Generic_MIL_Dataset
+
+
+def _resolve_data_mag(default_value, dataset_cls):
+    value = args.data_mag if args.data_mag is not None else default_value
+    if dataset_cls is Generic_H5_MIL_Dataset and isinstance(value, str):
+        if value.strip() == '' or value.lower() == 'none':
+            return None
+    return value
+
+
+def _build_dataset(default_csv, default_data_mag, label_dict):
+    label_override = _parse_label_map(args.label_map)
+    dataset_cls = _resolve_dataset_class()
+    csv_path = args.csv_path if args.csv_path else default_csv
+    data_mag = _resolve_data_mag(default_data_mag, dataset_cls)
+
+    dataset_kwargs = dict(
+        csv_path=csv_path,
+        data_dir=args.data_root_dir,
+        data_mag=data_mag,
+        shuffle=False,
+        seed=10,
+        print_info=True,
+        label_dict=label_override if label_override is not None else label_dict,
+        patient_strat=False,
+        ignore=[],
+    )
+
+    if dataset_cls is Generic_H5_MIL_Dataset:
+        dataset_kwargs.update(
+            feature_key=_parse_h5_keys(args.h5_feature_key),
+            coord_key=_parse_h5_keys(args.h5_coord_key),
+            inst_label_key=_parse_h5_keys(args.h5_inst_key, allow_empty=True),
+            file_suffix=args.h5_file_suffix,
+            file_ext=args.h5_file_ext,
+            use_float32=not args.h5_keep_dtype,
+        )
+
+    return dataset_cls(**dataset_kwargs)
 
 def preprocess_features(npdata, pca):
     """Preprocess an array of features.
@@ -216,45 +309,30 @@ def reduce(args, bag_feats, k, cur):
 def main(args):
     # define dataset
     print('Define the dataset...', end=' ')
+    dataset = None
     if args.task == 'renal_subtype_yfy':
-        args.n_classes=3
+        default_labels = {'ccrcc': 0, 'prcc': 1, 'chrcc': 2}
+        args.n_classes = len(set(default_labels.values()))
         if args.model_type in ['PAMIL']:
-            dataset = Generic_MIL_Dataset(csv_path = 'dataset_csv/renal_subtyping_yfy_npy.csv',
-                data_dir = os.path.join(args.data_root_dir),
-                data_mag = '0_1024',
-                shuffle = False, 
-                seed = 10, 
-                print_info = True,
-                label_dict = {'ccrcc':0, 'prcc':1, 'chrcc':2},
-                patient_strat= False,
-                ignore=[])
+            dataset = _build_dataset('dataset_csv/renal_subtyping_yfy_npy.csv', '0_1024', default_labels)
     elif args.task == 'renal_subtype':
-        args.n_classes=3
+        default_labels = {'ccrcc': 0, 'prcc': 1, 'chrcc': 2}
+        args.n_classes = len(set(default_labels.values()))
         if args.model_type in ['PAMIL']:
-            dataset = Generic_MIL_Dataset(csv_path = 'dataset_csv/renal_subtyping_npy.csv',
-                data_dir = os.path.join(args.data_root_dir),
-                data_mag = '1_512',
-                shuffle = False, 
-                seed = 10, 
-                print_info = True,
-                label_dict = {'ccrcc':0, 'prcc':1, 'chrcc':2},
-                patient_strat= False,
-                ignore=[])
-                
+            dataset = _build_dataset('dataset_csv/renal_subtyping_npy.csv', '1_512', default_labels)
+
     elif args.task == 'lung_subtype':
-        args.n_classes=2
+        default_labels = {'luad': 0, 'lusc': 1}
+        args.n_classes = len(set(default_labels.values()))
         if args.model_type in ['PAMIL']:
-            dataset = Generic_MIL_Dataset(csv_path = 'dataset_csv/lung_subtyping_npy.csv',
-                data_dir = os.path.join(args.data_root_dir),
-                data_mag = '1_512',
-                shuffle = False, 
-                seed = 10, 
-                print_info = True,
-                label_dict = {'luad':0, 'lusc':1},
-                patient_strat= False,
-                ignore=[])
+            dataset = _build_dataset('dataset_csv/lung_subtyping_npy.csv', '1_512', default_labels)
     else:
         raise NotImplementedError
+
+    if args.model_type in ['clam_sb', 'clam_mb', 'PAMIL']:
+        if dataset is None:
+            raise ValueError('Dataset initialisation failed. Check task/model configuration.')
+        args.n_classes = dataset.num_classes
     
     print('Done!')
     
