@@ -95,6 +95,11 @@ class EarlyStopping:
         torch.save(model.state_dict(), ckpt_name)
         self.val_loss_min = val_loss
 
+# ------------------ 🔴
+def _get_loss(instance_dict, key, device):
+    return instance_dict.get(key, torch.tensor(0.0, device=device))
+# ------------------🔴 
+
 
 def train(datasets, cur, args):
     """   
@@ -317,7 +322,8 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
             loss_inst = instance_dict['loss_inst']
             train_inst_loss += loss_inst.item()
             total_loss += args.w_inst * loss_inst  # v16
-        elif args.attention_er:
+        # elif args.attention_er: # og 
+        elif args.attention_er and 'loss_att_er' in instance_dict:  #🔴  added this 
             loss_att_er = instance_dict['loss_att_er']
             total_loss += args.w_att_er * loss_att_er  # v18
         if args.w_proto_clst != 0:
