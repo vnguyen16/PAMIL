@@ -270,19 +270,27 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
     all_inst_score = []
     print('\n')
     for batch_idx, (data, label, cors, inst_label, _) in enumerate(loader):
-        
+
         data, label = data.to(device), label.to(device)
         label_bn = torch.zeros(n_classes)
         label_bn[label.long()] = 1
         label_bn = label_bn.to(device)
-        
+
         logits, Y_prob, Y_hat, instance_dict = model(data, inst_pred=args.inst_pred, label=label)
         Y_prob = Y_prob.squeeze(0)
-        inst_label = inst_label[0]
-        score = instance_dict['A_raw'].T
 
-        if inst_label!=[]:
-            all_inst_label += inst_label
+        inst_label = inst_label[0]
+        if isinstance(inst_label, torch.Tensor):
+            inst_label = inst_label.detach().cpu().numpy()
+        inst_label = np.asarray(inst_label)
+        has_inst_labels = inst_label.size > 0
+
+        score = instance_dict.get('A_raw')
+        if score is not None:
+            score = score.T
+
+        if has_inst_labels and score is not None:
+            all_inst_label += inst_label.tolist()
             inst_score = score.detach().cpu().numpy()
             all_inst_score.append(inst_score)
 
@@ -306,22 +314,24 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
 
         # === use the inst loss like clam, v16 === 
         total_loss = loss_cls
-        if args.w_er != 0:
-            loss_er = instance_dict['loss_er']
+        loss_er = instance_dict.get('loss_er')
+        if args.w_er != 0 and loss_er is not None:
             total_loss += args.w_er * loss_er
-        if args.w_clst != 0:
-            loss_clst = instance_dict['loss_clst']
+        loss_clst = instance_dict.get('loss_clst')
+        if args.w_clst != 0 and loss_clst is not None:
             total_loss += args.w_clst * loss_clst
-            
+
         if args.inst_pred:
-            loss_inst = instance_dict['loss_inst']
-            train_inst_loss += loss_inst.item()
-            total_loss += args.w_inst * loss_inst  # v16
+            loss_inst = instance_dict.get('loss_inst')
+            if loss_inst is not None:
+                train_inst_loss += loss_inst.item()
+                total_loss += args.w_inst * loss_inst  # v16
         elif args.attention_er:
-            loss_att_er = instance_dict['loss_att_er']
-            total_loss += args.w_att_er * loss_att_er  # v18
-        if args.w_proto_clst != 0:
-            loss_proto_clst = instance_dict['loss_proto_clst']
+            loss_att_er = instance_dict.get('loss_att_er')
+            if loss_att_er is not None:
+                total_loss += args.w_att_er * loss_att_er  # v18
+        loss_proto_clst = instance_dict.get('loss_proto_clst')
+        if args.w_proto_clst != 0 and loss_proto_clst is not None:
             total_loss += args.w_proto_clst * loss_proto_clst
         
         loss_value = total_loss.item()
@@ -341,37 +351,41 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
     train_error /= len(loader)
     
     # cal inst_auc and inst_acc
-    all_inst_score = np.concatenate(all_inst_score)
+    if all_inst_score:
+        all_inst_score = np.concatenate(all_inst_score)
 
-    # inst_acc
-    for class_idx in range(n_classes):
-        inst_score = all_inst_score[:, class_idx]
-        inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
-        all_inst_score[:,class_idx] = inst_score
-
-    index = np.argmax(all_inst_score,axis=1)
-    all_inst_pred = []
-    for i in range(all_inst_score.shape[0]):
-        idx = index[i]
-        if all_inst_score[i][idx]>0.5:
-            all_inst_pred.append(idx)
-        else:
-            all_inst_pred.append(n_classes)
-    inst_acc = accuracy_score(all_inst_label, all_inst_pred)
-    print(classification_report(all_inst_label, all_inst_pred, zero_division=1))
-    
-    # inst_auc
-    inst_aucs = []
-    binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
-    for class_idx in range(n_classes):
-        if class_idx in all_inst_label:
+        # inst_acc
+        for class_idx in range(n_classes):
             inst_score = all_inst_score[:, class_idx]
-            # inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
-            fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
-            inst_aucs.append(calc_auc(fpr, tpr))
-        else:
-            inst_aucs.append(float('nan'))
-    inst_auc = np.nanmean(np.array(inst_aucs))
+            inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min() + 1e-5))
+            all_inst_score[:,class_idx] = inst_score
+
+        index = np.argmax(all_inst_score,axis=1)
+        all_inst_pred = []
+        for i in range(all_inst_score.shape[0]):
+            idx = index[i]
+            if all_inst_score[i][idx]>0.5:
+                all_inst_pred.append(idx)
+            else:
+                all_inst_pred.append(n_classes)
+        inst_acc = accuracy_score(all_inst_label, all_inst_pred)
+        print(classification_report(all_inst_label, all_inst_pred, zero_division=1))
+
+        # inst_auc
+        inst_aucs = []
+        binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
+        for class_idx in range(n_classes):
+            if class_idx in all_inst_label:
+                inst_score = all_inst_score[:, class_idx]
+                fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
+                inst_aucs.append(calc_auc(fpr, tpr))
+            else:
+                inst_aucs.append(float('nan'))
+        inst_auc = np.nanmean(np.array(inst_aucs))
+    else:
+        inst_auc = float('nan')
+        if epoch == 0:
+            print('No instance labels provided; skipping instance-level training metrics.')
 
     print('Epoch: {}, train_loss: {:.4f}, train_error: {:.4f}, inst_auc: {:.4f}'.format(epoch, train_loss, train_error, inst_auc))
     for i in range(n_classes):
@@ -409,14 +423,22 @@ def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = 
             label_bn = torch.zeros(n_classes)
             label_bn[label.long()] = 1
             label_bn = label_bn.to(device)
-            
+
             logits, Y_prob, Y_hat, instance_dict = model(data, inst_pred=False)
             Y_prob=Y_prob.squeeze(0)
+
             inst_label = inst_label[0]
-            score = instance_dict['A_raw'].T
-            
-            if inst_label!=[]:
-                all_inst_label += inst_label
+            if isinstance(inst_label, torch.Tensor):
+                inst_label = inst_label.detach().cpu().numpy()
+            inst_label = np.asarray(inst_label)
+            has_inst_labels = inst_label.size > 0
+
+            score = instance_dict.get('A_raw')
+            if score is not None:
+                score = score.T
+
+            if has_inst_labels and score is not None:
+                all_inst_label += inst_label.tolist()
                 inst_score = score.detach().cpu().numpy()
                 all_inst_score.append(inst_score)
                 
@@ -424,11 +446,11 @@ def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = 
             
             loss_cls = loss_fn(Y_prob, label_bn.squeeze().float())
             loss = loss_cls
-            if args.w_er != 0:
-                loss_er = instance_dict['loss_er']
+            loss_er = instance_dict.get('loss_er')
+            if args.w_er != 0 and loss_er is not None:
                 loss += args.w_er * loss_er
-            if args.w_clst != 0:
-                loss_clst = instance_dict['loss_clst']
+            loss_clst = instance_dict.get('loss_clst')
+            if args.w_clst != 0 and loss_clst is not None:
                 loss += args.w_clst * loss_clst
             val_loss += loss.item()
 
@@ -444,35 +466,38 @@ def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = 
     
     # cal inst_auc and inst_acc
     # inst_acc
-    all_inst_score = np.concatenate(all_inst_score)
-    for class_idx in range(n_classes):
-        inst_score = all_inst_score[:, class_idx]
-        inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()+1e-5))
-        all_inst_score[:,class_idx] = inst_score
-
-    index = np.argmax(all_inst_score,axis=1)
-    all_inst_pred = []
-    for i in range(all_inst_score.shape[0]):
-        idx = index[i]
-        if all_inst_score[i][idx]>0.5:
-            all_inst_pred.append(idx)
-        else:
-            all_inst_pred.append(n_classes)
-    inst_acc = accuracy_score(all_inst_label, all_inst_pred)
-    print(classification_report(all_inst_label, all_inst_pred, zero_division=1))
-    
-    # inst_auc
-    inst_aucs = []
-    binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
-    for class_idx in range(n_classes):
-        if class_idx in all_inst_label:
+    if all_inst_score:
+        all_inst_score = np.concatenate(all_inst_score)
+        for class_idx in range(n_classes):
             inst_score = all_inst_score[:, class_idx]
-            # inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
-            fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
-            inst_aucs.append(calc_auc(fpr, tpr))
-        else:
-            inst_aucs.append(float('nan'))
-    inst_auc = np.nanmean(np.array(inst_aucs))
+            inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()+1e-5))
+            all_inst_score[:,class_idx] = inst_score
+
+        index = np.argmax(all_inst_score,axis=1)
+        all_inst_pred = []
+        for i in range(all_inst_score.shape[0]):
+            idx = index[i]
+            if all_inst_score[i][idx]>0.5:
+                all_inst_pred.append(idx)
+            else:
+                all_inst_pred.append(n_classes)
+        inst_acc = accuracy_score(all_inst_label, all_inst_pred)
+        print(classification_report(all_inst_label, all_inst_pred, zero_division=1))
+
+        # inst_auc
+        inst_aucs = []
+        binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
+        for class_idx in range(n_classes):
+            if class_idx in all_inst_label:
+                inst_score = all_inst_score[:, class_idx]
+                fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
+                inst_aucs.append(calc_auc(fpr, tpr))
+            else:
+                inst_aucs.append(float('nan'))
+        inst_auc = np.nanmean(np.array(inst_aucs))
+    else:
+        inst_auc = float('nan')
+        print('No instance labels provided; skipping instance-level metrics.')
     
     aucs = []
     binary_labels = labels # label_binarize(labels, classes=[i for i in range(n_classes)])
@@ -540,19 +565,25 @@ def summary(model, loader, n_classes, model_type):
         label_bn = label_bn.to(device)
         
         inst_label = inst_label[0]
-        
+        if isinstance(inst_label, torch.Tensor):
+            inst_label = inst_label.detach().cpu().numpy()
+        inst_label = np.asarray(inst_label)
+
         slide_id = slide_ids.iloc[batch_idx]
         with torch.no_grad():
             logits, Y_prob, Y_hat, instance_dict = model(data, inst_pred=False)
             Y_prob=Y_prob.squeeze(0)
         if model_type in ['clam_sb', 'clam_mb', 'PAMIL']:
-            score = instance_dict['A_raw'].T
-            # score = F.softmax(score,dim=1)
+            score = instance_dict.get('A_raw')
+            if score is not None:
+                score = score.T
         elif model_type in ['wsod']:
             score = logits
-            
-        if inst_label!=[]:
-            all_inst_label += inst_label
+        else:
+            score = None
+
+        if inst_label.size > 0 and score is not None:
+            all_inst_label += inst_label.tolist()
             inst_score = score.detach().cpu().numpy()
             all_inst_score.append(inst_score)
 
@@ -569,39 +600,38 @@ def summary(model, loader, n_classes, model_type):
     
 
     # cal inst_auc and inst_acc
-    all_inst_score = np.concatenate(all_inst_score)
-    # inst_acc
-    for class_idx in range(n_classes):
-        inst_score = all_inst_score[:,class_idx]
-        inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
-        all_inst_score[:,class_idx] = inst_score
-
-    index = np.argmax(all_inst_score,axis=1)
-    all_inst_pred = []
-    for i in range(all_inst_score.shape[0]):
-        idx = index[i]
-        if all_inst_score[i][idx]>0.5:
-            all_inst_pred.append(idx+1)
-        else:
-            all_inst_pred.append(n_classes)
-    inst_acc = accuracy_score(all_inst_label, all_inst_pred)
-    print(classification_report(all_inst_label, all_inst_pred,zero_division=1))
-    
-    inst_aucs = []
-    binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
-    for class_idx in range(n_classes):
-        if class_idx in all_inst_label:
+    if all_inst_score:
+        all_inst_score = np.concatenate(all_inst_score)
+        # inst_acc
+        for class_idx in range(n_classes):
             inst_score = all_inst_score[:,class_idx]
-            # inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
-            fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
-            inst_aucs.append(calc_auc(fpr, tpr))
-            # inst_score_binary = [1 if i>0.5 else 0 for i in inst_score]
-            # inst_accs.append(accuracy_score(binary_inst_label[:, class_idx+1],inst_score_binary))
-        else:
-            inst_aucs.append(float('nan'))
-            # inst_accs.append(float('nan'))
+            inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min() + 1e-5))
+            all_inst_score[:,class_idx] = inst_score
 
-    inst_auc = np.nanmean(np.array(inst_aucs))
+        index = np.argmax(all_inst_score,axis=1)
+        all_inst_pred = []
+        for i in range(all_inst_score.shape[0]):
+            idx = index[i]
+            if all_inst_score[i][idx]>0.5:
+                all_inst_pred.append(idx+1)
+            else:
+                all_inst_pred.append(n_classes)
+        inst_acc = accuracy_score(all_inst_label, all_inst_pred)
+        print(classification_report(all_inst_label, all_inst_pred,zero_division=1))
+
+        inst_aucs = []
+        binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
+        for class_idx in range(n_classes):
+            if class_idx in all_inst_label:
+                inst_score = all_inst_score[:,class_idx]
+                fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
+                inst_aucs.append(calc_auc(fpr, tpr))
+            else:
+                inst_aucs.append(float('nan'))
+
+        inst_auc = np.nanmean(np.array(inst_aucs))
+    else:
+        inst_auc = float('nan')
     # inst_acc = np.nanmean(np.array(inst_accs))
 
     aucs = []

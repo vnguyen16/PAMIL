@@ -304,18 +304,26 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
     all_preds = np.zeros((len(loader), n_classes))
     print('\n')
     for batch_idx, (data, label, cors, inst_label, _) in enumerate(loader):
-        
+
         data, label = data.to(device), label.to(device)
-        
+
         logits, Y_prob, Y_hat, instance_dict = model(data, inst_pred=args.inst_pred, label=label)
         Y_prob = Y_prob.squeeze(0)
+
         inst_label = inst_label[0]
-        score = instance_dict['A_raw'].T
-        loss_er = instance_dict['loss_er']
-        loss_clst = instance_dict['loss_clst']
+        if isinstance(inst_label, torch.Tensor):
+            inst_label = inst_label.detach().cpu().numpy()
+        inst_label = np.asarray(inst_label)
+        has_inst_labels = inst_label.size > 0
+
+        score = instance_dict.get('A_raw')
+        if score is not None:
+            score = score.T
+        loss_er = instance_dict.get('loss_er')
+        loss_clst = instance_dict.get('loss_clst')
         index_label = torch.nonzero(label.squeeze(0)).to(device)
-                
-        
+
+
         # loss function
         loss_cls = loss_fn(Y_prob, label.squeeze().float())
         
@@ -332,17 +340,24 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
         # train_inst_loss += loss_inst.item()  # v15
         
         # loss
-        total_loss = loss_cls + args.w_er * loss_er + args.w_clst * loss_clst
+        total_loss = loss_cls
+        if args.w_er != 0 and loss_er is not None:
+            total_loss += args.w_er * loss_er
+        if args.w_clst != 0 and loss_clst is not None:
+            total_loss += args.w_clst * loss_clst
         if args.inst_pred:
-            loss_inst = instance_dict['loss_inst']
-            train_inst_loss += loss_inst.item()
-            total_loss += args.w_inst * loss_inst  # use the inst loss like clam，v16
+            loss_inst = instance_dict.get('loss_inst')
+            if loss_inst is not None:
+                train_inst_loss += loss_inst.item()
+                total_loss += args.w_inst * loss_inst  # use the inst loss like clam，v16
         elif args.attention_er:
-            loss_att_er = instance_dict['loss_att_er']
-            total_loss += args.w_att_er * loss_att_er  # v18
+            loss_att_er = instance_dict.get('loss_att_er')
+            if loss_att_er is not None:
+                total_loss += args.w_att_er * loss_att_er  # v18
         elif args.w_proto_clst != 0:
-            loss_proto_clst = instance_dict['loss_proto_clst']
-            total_loss += args.w_proto_clst * loss_proto_clst  # v21
+            loss_proto_clst = instance_dict.get('loss_proto_clst')
+            if loss_proto_clst is not None:
+                total_loss += args.w_proto_clst * loss_proto_clst  # v21
         
         loss_value = total_loss.item()
         train_loss += loss_value
@@ -355,8 +370,8 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
         optimizer.zero_grad()
         
         # inst-level evaluation
-        if inst_label != []:
-            all_inst_label += inst_label
+        if has_inst_labels and score is not None:
+            all_inst_label += inst_label.tolist()
             inst_score = score.detach().cpu().numpy()
 
             if args.task == 'camelyon':
@@ -403,7 +418,7 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
                 neg_score = [0]*len(inst_label)
             
             all_inst_score.append(inst_score)
-            all_inst_score_neg += neg_score
+            all_inst_score_neg += list(neg_score)
             
         # wsi-level evaluation
         acc_logger.log(Y_hat, label)
@@ -426,30 +441,36 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
     
     # =================================================================
     # calculate inst_auc and inst_acc
-    all_inst_score = np.concatenate(all_inst_score, axis=0)
-    all_normal_score = [1-x for x in all_inst_score_neg] #转化为是normal类的概率 越高越好
-    
-    # get inst_pred inst_acc
-    inst_accs = []
-    for i in range(n_classes+1):
-        if len(inst_binary_labels[i])==0:
-            continue
-        inst_accs.append(accuracy_score(inst_binary_labels[i], inst_preds[i]))
-        inst_acc = np.mean(inst_accs)
-        print('class {}'.format(str(i)))
-        print(classification_report(inst_binary_labels[i], inst_preds[i],zero_division=1))
+    if all_inst_score:
+        all_inst_score = np.concatenate(all_inst_score, axis=0)
+        all_normal_score = [1-x for x in all_inst_score_neg] #转化为是normal类的概率 越高越好
 
-    # get inst_auc
-    inst_aucs = []
-    for class_idx in range(n_classes):
-        inst_score_sub = inst_probs[class_idx]
-        if len(inst_score_sub)==0:
-            continue
-        fpr, tpr, _ = roc_curve(inst_binary_labels[class_idx], inst_score_sub)
-        inst_aucs.append(calc_auc(fpr, tpr))
-    fpr,tpr,_ = roc_curve(inst_binary_labels[n_classes], all_normal_score)
-    inst_aucs.append(calc_auc(fpr, tpr))
-    inst_auc = np.nanmean(np.array(inst_aucs))
+        # get inst_pred inst_acc
+        inst_accs = []
+        for i in range(n_classes+1):
+            if len(inst_binary_labels[i])==0:
+                continue
+            inst_accs.append(accuracy_score(inst_binary_labels[i], inst_preds[i]))
+            inst_acc = np.mean(inst_accs)
+            print('class {}'.format(str(i)))
+            print(classification_report(inst_binary_labels[i], inst_preds[i],zero_division=1))
+
+        # get inst_auc
+        inst_aucs = []
+        for class_idx in range(n_classes):
+            inst_score_sub = inst_probs[class_idx]
+            if len(inst_score_sub)==0:
+                continue
+            fpr, tpr, _ = roc_curve(inst_binary_labels[class_idx], inst_score_sub)
+            inst_aucs.append(calc_auc(fpr, tpr))
+        if len(inst_binary_labels[n_classes]) > 0:
+            fpr,tpr,_ = roc_curve(inst_binary_labels[n_classes], all_normal_score)
+            inst_aucs.append(calc_auc(fpr, tpr))
+        inst_auc = np.nanmean(np.array(inst_aucs))
+    else:
+        inst_auc = float('nan')
+        if epoch == 0:
+            print('No instance labels provided; skipping instance-level training metrics.')
 
     aucs = []
     binary_labels = all_labels
@@ -502,25 +523,37 @@ def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = 
     
     with torch.no_grad():
         for batch_idx, (data, label, cors, inst_label, _) in enumerate(loader):
-            data, label = data.to(device), label.to(device)      
+            data, label = data.to(device), label.to(device)
 
             logits, Y_prob, Y_hat, instance_dict = model(data, inst_pred=False)
             Y_prob=Y_prob.squeeze(0)
+
             inst_label = inst_label[0]
-            score = instance_dict['A_raw'].T
-            loss_er = instance_dict['loss_er']
-            loss_clst = instance_dict['loss_clst']
+            if isinstance(inst_label, torch.Tensor):
+                inst_label = inst_label.detach().cpu().numpy()
+            inst_label = np.asarray(inst_label)
+            has_inst_labels = inst_label.size > 0
+
+            score = instance_dict.get('A_raw')
+            if score is not None:
+                score = score.T
+            loss_er = instance_dict.get('loss_er')
+            loss_clst = instance_dict.get('loss_clst')
             index_label = torch.nonzero(label.squeeze(0)).to(device)
-            
+
             loss_cls = loss_fn(Y_prob, label.squeeze().float())
-            loss = loss_cls + args.w_er * loss_er + args.w_clst * loss_clst
+            loss = loss_cls
+            if args.w_er != 0 and loss_er is not None:
+                loss += args.w_er * loss_er
+            if args.w_clst != 0 and loss_clst is not None:
+                loss += args.w_clst * loss_clst
 
             val_loss += loss.item()
-            
+
             # =============================
             # inst-level evaluation
-            if inst_label != []:
-                all_inst_label += inst_label
+            if has_inst_labels and score is not None:
+                all_inst_label += inst_label.tolist()
                 inst_score = score.detach().cpu().numpy()
 
                 if args.task == 'camelyon':
@@ -565,9 +598,9 @@ def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = 
                     # neg_score = list(neg_score)
                 else:
                     neg_score = [0]*len(inst_label)
-                
+
                 all_inst_score.append(inst_score)
-                all_inst_score_neg += neg_score
+                all_inst_score_neg += list(neg_score)
                 
             # wsi-level evaluation
             acc_logger.log(Y_hat, label)
@@ -587,30 +620,35 @@ def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = 
     
     # =================================================================
     # calculate inst_auc and inst_acc
-    all_inst_score = np.concatenate(all_inst_score, axis=0)
-    all_normal_score = [1-x for x in all_inst_score_neg] #转化为是normal类的概率 越高越好
-    
-    # get inst_pred inst_acc
-    inst_accs = []
-    for i in range(n_classes+1):
-        if len(inst_binary_labels[i])==0:
-            continue
-        inst_accs.append(accuracy_score(inst_binary_labels[i], inst_preds[i]))
-        inst_acc = np.mean(inst_accs)
-        print('class {}'.format(str(i)))
-        print(classification_report(inst_binary_labels[i], inst_preds[i],zero_division=1))
+    if all_inst_score:
+        all_inst_score = np.concatenate(all_inst_score, axis=0)
+        all_normal_score = [1-x for x in all_inst_score_neg] #转化为是normal类的概率 越高越好
 
-    # get inst_auc
-    inst_aucs = []
-    for class_idx in range(n_classes):
-        inst_score_sub = inst_probs[class_idx]
-        if len(inst_score_sub)==0:
-            continue
-        fpr, tpr, _ = roc_curve(inst_binary_labels[class_idx], inst_score_sub)
-        inst_aucs.append(calc_auc(fpr, tpr))
-    fpr,tpr,_ = roc_curve(inst_binary_labels[n_classes], all_normal_score)
-    inst_aucs.append(calc_auc(fpr, tpr))
-    inst_auc = np.nanmean(np.array(inst_aucs))
+        # get inst_pred inst_acc
+        inst_accs = []
+        for i in range(n_classes+1):
+            if len(inst_binary_labels[i])==0:
+                continue
+            inst_accs.append(accuracy_score(inst_binary_labels[i], inst_preds[i]))
+            inst_acc = np.mean(inst_accs)
+            print('class {}'.format(str(i)))
+            print(classification_report(inst_binary_labels[i], inst_preds[i],zero_division=1))
+
+        # get inst_auc
+        inst_aucs = []
+        for class_idx in range(n_classes):
+            inst_score_sub = inst_probs[class_idx]
+            if len(inst_score_sub)==0:
+                continue
+            fpr, tpr, _ = roc_curve(inst_binary_labels[class_idx], inst_score_sub)
+            inst_aucs.append(calc_auc(fpr, tpr))
+        if len(inst_binary_labels[n_classes]) > 0:
+            fpr,tpr,_ = roc_curve(inst_binary_labels[n_classes], all_normal_score)
+            inst_aucs.append(calc_auc(fpr, tpr))
+        inst_auc = np.nanmean(np.array(inst_aucs))
+    else:
+        inst_auc = float('nan')
+        print('No instance labels provided; skipping instance-level validation metrics.')
 
     aucs = []
     binary_labels = all_labels
@@ -685,21 +723,29 @@ def summary(model, loader, args):
     for batch_idx, (data, label, cors, inst_label, _) in enumerate(loader):
         data, label = data.to(device), label.to(device)
         inst_label = inst_label[0]
+        if isinstance(inst_label, torch.Tensor):
+            inst_label = inst_label.detach().cpu().numpy()
+        inst_label = np.asarray(inst_label)
+        has_inst_labels = inst_label.size > 0
         index_label = torch.nonzero(label.squeeze(0)).to(device)
         slide_id = slide_ids.iloc[batch_idx]
         with torch.no_grad():
             logits, Y_prob, Y_hat, instance_dict = model(data, inst_pred=False)
             Y_prob=Y_prob.squeeze(0)
         if model_type in ['clam_sb', 'clam_mb', 'PAMIL']:
-            score = instance_dict['A_raw'].T
+            score = instance_dict.get('A_raw')
+            if score is not None:
+                score = score.T
             # score = F.softmax(score,dim=1)
         elif model_type in ['wsod']:
             score = logits
+        else:
+            score = None
             
             
         # inst-level evaluation
-        if inst_label != []:
-            all_inst_label += inst_label
+        if has_inst_labels and score is not None:
+            all_inst_label += inst_label.tolist()
             inst_score = score.detach().cpu().numpy()
 
             if args.task == 'camelyon':
@@ -746,7 +792,7 @@ def summary(model, loader, args):
                 neg_score = [0]*len(inst_label)
             
             all_inst_score.append(inst_score)
-            all_inst_score_neg += neg_score
+            all_inst_score_neg += list(neg_score)
             
         # wsi-level evaluation
         acc_logger.log(Y_hat, label)
@@ -768,30 +814,35 @@ def summary(model, loader, args):
     
     # calculate inst_auc and inst_acc
     
-    all_inst_score = np.concatenate(all_inst_score, axis=0)
-    all_normal_score = [1-x for x in all_inst_score_neg] #转化为是normal类的概率 越高越好
-    
-    # get inst_pred inst_acc
-    inst_accs = []
-    for i in range(n_classes+1):
-        if len(inst_binary_labels[i])==0:
-            continue
-        inst_accs.append(accuracy_score(inst_binary_labels[i], inst_preds[i]))
-        inst_acc = np.mean(inst_accs)
-        print('class {}'.format(str(i)))
-        print(classification_report(inst_binary_labels[i], inst_preds[i],zero_division=1))
-    
-    # get inst_auc
-    inst_aucs = []
-    for class_idx in range(n_classes):
-        inst_score_sub = inst_probs[class_idx]
-        if len(inst_score_sub)==0:
-            continue
-        fpr, tpr, _ = roc_curve(inst_binary_labels[class_idx], inst_score_sub)
-        inst_aucs.append(calc_auc(fpr, tpr))
-    fpr,tpr,_ = roc_curve(inst_binary_labels[n_classes], all_normal_score)
-    inst_aucs.append(calc_auc(fpr, tpr))
-    inst_auc = np.nanmean(np.array(inst_aucs))
+    if all_inst_score:
+        all_inst_score = np.concatenate(all_inst_score, axis=0)
+        all_normal_score = [1-x for x in all_inst_score_neg] #转化为是normal类的概率 越高越好
+
+        # get inst_pred inst_acc
+        inst_accs = []
+        for i in range(n_classes+1):
+            if len(inst_binary_labels[i])==0:
+                continue
+            inst_accs.append(accuracy_score(inst_binary_labels[i], inst_preds[i]))
+            inst_acc = np.mean(inst_accs)
+            print('class {}'.format(str(i)))
+            print(classification_report(inst_binary_labels[i], inst_preds[i],zero_division=1))
+
+        # get inst_auc
+        inst_aucs = []
+        for class_idx in range(n_classes):
+            inst_score_sub = inst_probs[class_idx]
+            if len(inst_score_sub)==0:
+                continue
+            fpr, tpr, _ = roc_curve(inst_binary_labels[class_idx], inst_score_sub)
+            inst_aucs.append(calc_auc(fpr, tpr))
+        if len(inst_binary_labels[n_classes]) > 0:
+            fpr,tpr,_ = roc_curve(inst_binary_labels[n_classes], all_normal_score)
+            inst_aucs.append(calc_auc(fpr, tpr))
+        inst_auc = np.nanmean(np.array(inst_aucs))
+    else:
+        inst_auc = float('nan')
+        print('No instance labels provided; skipping instance-level metrics.')
 
 
     aucs = []
