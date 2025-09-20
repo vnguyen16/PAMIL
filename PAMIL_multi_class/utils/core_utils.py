@@ -311,10 +311,10 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
 
         # === use the inst loss like clam, v16 === 
         total_loss = loss_cls
-        if args.w_er != 0:
+        if args.w_er != 0 and 'loss_er' in instance_dict:
             loss_er = instance_dict['loss_er']
             total_loss += args.w_er * loss_er
-        if args.w_clst != 0:
+        if args.w_clst != 0 and 'loss_clst' in instance_dict:
             loss_clst = instance_dict['loss_clst']
             total_loss += args.w_clst * loss_clst
             
@@ -322,11 +322,10 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
             loss_inst = instance_dict['loss_inst']
             train_inst_loss += loss_inst.item()
             total_loss += args.w_inst * loss_inst  # v16
-        # elif args.attention_er: # og 
-        elif args.attention_er and 'loss_att_er' in instance_dict:  #🔴  added this 
+        elif args.attention_er and 'loss_att_er' in instance_dict:
             loss_att_er = instance_dict['loss_att_er']
             total_loss += args.w_att_er * loss_att_er  # v18
-        if args.w_proto_clst != 0:
+        if args.w_proto_clst != 0 and 'loss_proto_clst' in instance_dict:
             loss_proto_clst = instance_dict['loss_proto_clst']
             total_loss += args.w_proto_clst * loss_proto_clst
         
@@ -347,37 +346,41 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
     train_error /= len(loader)
     
     # cal inst_auc and inst_acc
-    all_inst_score = np.concatenate(all_inst_score)
+    inst_auc = float('nan')
+    if len(all_inst_score) > 0:
+        all_inst_score = np.concatenate(all_inst_score)
 
-    # inst_acc
-    for class_idx in range(n_classes):
-        inst_score = all_inst_score[:, class_idx]
-        inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
-        all_inst_score[:,class_idx] = inst_score
-
-    index = np.argmax(all_inst_score,axis=1)
-    all_inst_pred = []
-    for i in range(all_inst_score.shape[0]):
-        idx = index[i]
-        if all_inst_score[i][idx]>0.5:
-            all_inst_pred.append(idx)
-        else:
-            all_inst_pred.append(n_classes)
-    inst_acc = accuracy_score(all_inst_label, all_inst_pred)
-    print(classification_report(all_inst_label, all_inst_pred, zero_division=1))
-    
-    # inst_auc
-    inst_aucs = []
-    binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
-    for class_idx in range(n_classes):
-        if class_idx in all_inst_label:
+        # inst_acc
+        for class_idx in range(n_classes):
             inst_score = all_inst_score[:, class_idx]
-            # inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
-            fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
-            inst_aucs.append(calc_auc(fpr, tpr))
-        else:
-            inst_aucs.append(float('nan'))
-    inst_auc = np.nanmean(np.array(inst_aucs))
+            inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
+            all_inst_score[:,class_idx] = inst_score
+
+        index = np.argmax(all_inst_score,axis=1)
+        all_inst_pred = []
+        for i in range(all_inst_score.shape[0]):
+            idx = index[i]
+            if all_inst_score[i][idx]>0.5:
+                all_inst_pred.append(idx)
+            else:
+                all_inst_pred.append(n_classes)
+        inst_acc = accuracy_score(all_inst_label, all_inst_pred)
+        print(classification_report(all_inst_label, all_inst_pred, zero_division=1))
+
+        # inst_auc
+        inst_aucs = []
+        binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
+        for class_idx in range(n_classes):
+            if class_idx in all_inst_label:
+                inst_score = all_inst_score[:, class_idx]
+                # inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
+                fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
+                inst_aucs.append(calc_auc(fpr, tpr))
+            else:
+                inst_aucs.append(float('nan'))
+        inst_auc = np.nanmean(np.array(inst_aucs))
+    else:
+        print('No instance-level labels available for computing training instance metrics.')
 
     print('Epoch: {}, train_loss: {:.4f}, train_error: {:.4f}, inst_auc: {:.4f}'.format(epoch, train_loss, train_error, inst_auc))
     for i in range(n_classes):
@@ -389,7 +392,8 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
     if writer:
         writer.add_scalar('train/loss', train_loss, epoch)
         writer.add_scalar('train/error', train_error, epoch)
-        writer.add_scalar('train/inst_auc', inst_auc, epoch)
+        if not np.isnan(inst_auc):
+            writer.add_scalar('train/inst_auc', inst_auc, epoch)
         
 
 def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = None, writer = None, loss_fn = None, results_dir = None):
@@ -430,10 +434,10 @@ def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = 
             
             loss_cls = loss_fn(Y_prob, label_bn.squeeze().float())
             loss = loss_cls
-            if args.w_er != 0:
+            if args.w_er != 0 and 'loss_er' in instance_dict:
                 loss_er = instance_dict['loss_er']
                 loss += args.w_er * loss_er
-            if args.w_clst != 0:
+            if args.w_clst != 0 and 'loss_clst' in instance_dict:
                 loss_clst = instance_dict['loss_clst']
                 loss += args.w_clst * loss_clst
             val_loss += loss.item()
@@ -450,35 +454,39 @@ def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = 
     
     # cal inst_auc and inst_acc
     # inst_acc
-    all_inst_score = np.concatenate(all_inst_score)
-    for class_idx in range(n_classes):
-        inst_score = all_inst_score[:, class_idx]
-        inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()+1e-5))
-        all_inst_score[:,class_idx] = inst_score
-
-    index = np.argmax(all_inst_score,axis=1)
-    all_inst_pred = []
-    for i in range(all_inst_score.shape[0]):
-        idx = index[i]
-        if all_inst_score[i][idx]>0.5:
-            all_inst_pred.append(idx)
-        else:
-            all_inst_pred.append(n_classes)
-    inst_acc = accuracy_score(all_inst_label, all_inst_pred)
-    print(classification_report(all_inst_label, all_inst_pred, zero_division=1))
-    
-    # inst_auc
-    inst_aucs = []
-    binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
-    for class_idx in range(n_classes):
-        if class_idx in all_inst_label:
+    inst_auc = float('nan')
+    if len(all_inst_score) > 0:
+        all_inst_score = np.concatenate(all_inst_score)
+        for class_idx in range(n_classes):
             inst_score = all_inst_score[:, class_idx]
-            # inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
-            fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
-            inst_aucs.append(calc_auc(fpr, tpr))
-        else:
-            inst_aucs.append(float('nan'))
-    inst_auc = np.nanmean(np.array(inst_aucs))
+            inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()+1e-5))
+            all_inst_score[:,class_idx] = inst_score
+
+        index = np.argmax(all_inst_score,axis=1)
+        all_inst_pred = []
+        for i in range(all_inst_score.shape[0]):
+            idx = index[i]
+            if all_inst_score[i][idx]>0.5:
+                all_inst_pred.append(idx)
+            else:
+                all_inst_pred.append(n_classes)
+        inst_acc = accuracy_score(all_inst_label, all_inst_pred)
+        print(classification_report(all_inst_label, all_inst_pred, zero_division=1))
+
+        # inst_auc
+        inst_aucs = []
+        binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
+        for class_idx in range(n_classes):
+            if class_idx in all_inst_label:
+                inst_score = all_inst_score[:, class_idx]
+                # inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
+                fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
+                inst_aucs.append(calc_auc(fpr, tpr))
+            else:
+                inst_aucs.append(float('nan'))
+        inst_auc = np.nanmean(np.array(inst_aucs))
+    else:
+        print('No instance-level labels available for computing validation instance metrics.')
     
     aucs = []
     binary_labels = labels # label_binarize(labels, classes=[i for i in range(n_classes)])
@@ -503,7 +511,8 @@ def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = 
         writer.add_scalar('val/loss', val_loss, epoch)
         writer.add_scalar('val/auc', auc, epoch)
         writer.add_scalar('val/error', val_error, epoch)
-        writer.add_scalar('val/inst_auc', inst_auc, epoch)
+        if not np.isnan(inst_auc):
+            writer.add_scalar('val/inst_auc', inst_auc, epoch)
 
 
     for i in range(n_classes):
@@ -575,39 +584,43 @@ def summary(model, loader, n_classes, model_type):
     
 
     # cal inst_auc and inst_acc
-    all_inst_score = np.concatenate(all_inst_score)
-    # inst_acc
-    for class_idx in range(n_classes):
-        inst_score = all_inst_score[:,class_idx]
-        inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
-        all_inst_score[:,class_idx] = inst_score
-
-    index = np.argmax(all_inst_score,axis=1)
-    all_inst_pred = []
-    for i in range(all_inst_score.shape[0]):
-        idx = index[i]
-        if all_inst_score[i][idx]>0.5:
-            all_inst_pred.append(idx+1)
-        else:
-            all_inst_pred.append(n_classes)
-    inst_acc = accuracy_score(all_inst_label, all_inst_pred)
-    print(classification_report(all_inst_label, all_inst_pred,zero_division=1))
-    
-    inst_aucs = []
-    binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
-    for class_idx in range(n_classes):
-        if class_idx in all_inst_label:
+    inst_auc = float('nan')
+    if len(all_inst_score) > 0:
+        all_inst_score = np.concatenate(all_inst_score)
+        # inst_acc
+        for class_idx in range(n_classes):
             inst_score = all_inst_score[:,class_idx]
-            # inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
-            fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
-            inst_aucs.append(calc_auc(fpr, tpr))
-            # inst_score_binary = [1 if i>0.5 else 0 for i in inst_score]
-            # inst_accs.append(accuracy_score(binary_inst_label[:, class_idx+1],inst_score_binary))
-        else:
-            inst_aucs.append(float('nan'))
-            # inst_accs.append(float('nan'))
+            inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
+            all_inst_score[:,class_idx] = inst_score
 
-    inst_auc = np.nanmean(np.array(inst_aucs))
+        index = np.argmax(all_inst_score,axis=1)
+        all_inst_pred = []
+        for i in range(all_inst_score.shape[0]):
+            idx = index[i]
+            if all_inst_score[i][idx]>0.5:
+                all_inst_pred.append(idx+1)
+            else:
+                all_inst_pred.append(n_classes)
+        inst_acc = accuracy_score(all_inst_label, all_inst_pred)
+        print(classification_report(all_inst_label, all_inst_pred,zero_division=1))
+
+        inst_aucs = []
+        binary_inst_label = label_binarize(all_inst_label, classes=[i for i in range(n_classes+1)])
+        for class_idx in range(n_classes):
+            if class_idx in all_inst_label:
+                inst_score = all_inst_score[:,class_idx]
+                # inst_score = list((inst_score-inst_score.min())/(inst_score.max()-inst_score.min()))
+                fpr, tpr, _ = roc_curve(binary_inst_label[:, class_idx], inst_score)
+                inst_aucs.append(calc_auc(fpr, tpr))
+                # inst_score_binary = [1 if i>0.5 else 0 for i in inst_score]
+                # inst_accs.append(accuracy_score(binary_inst_label[:, class_idx+1],inst_score_binary))
+            else:
+                inst_aucs.append(float('nan'))
+                # inst_accs.append(float('nan'))
+
+        inst_auc = np.nanmean(np.array(inst_aucs))
+    else:
+        print('No instance-level labels available for computing test instance metrics.')
     # inst_acc = np.nanmean(np.array(inst_accs))
 
     aucs = []
