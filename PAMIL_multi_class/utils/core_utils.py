@@ -306,7 +306,7 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
 
         # === use the inst loss like clam, v16 === 
         total_loss = loss_cls
-        if args.w_er != 0:
+        if args.w_er != 0 and 'loss_er' in instance_dict:
             loss_er = instance_dict['loss_er']
             total_loss += args.w_er * loss_er
         if args.w_clst != 0:
@@ -317,7 +317,7 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
             loss_inst = instance_dict['loss_inst']
             train_inst_loss += loss_inst.item()
             total_loss += args.w_inst * loss_inst  # v16
-        elif args.attention_er:
+        elif args.attention_er and 'loss_att_er' in instance_dict:
             loss_att_er = instance_dict['loss_att_er']
             total_loss += args.w_att_er * loss_att_er  # v18
         if args.w_proto_clst != 0:
