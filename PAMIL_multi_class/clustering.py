@@ -326,6 +326,11 @@ def main(args):
         args.n_classes = len(set(default_labels.values()))
         if args.model_type in ['PAMIL']:
             dataset = _build_dataset('dataset_csv/lung_subtyping_npy.csv', '1_512', default_labels)
+    elif args.task in ('fa_pt', 'custom_fa_pt'):
+        default_labels = {'FA': 0, 'PT': 1}
+        args.n_classes = len(set(default_labels.values()))
+        if args.model_type in ['PAMIL']:
+            dataset = _build_dataset('dataset_csv/hist_custom.csv', None, default_labels)
     else:
         raise NotImplementedError
 
