@@ -23,7 +23,7 @@ import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0' # og 2
 
 
 def main(args):
@@ -311,6 +311,13 @@ elif args.task == 'lung_subtype':
             '1_512',
             default_labels,
         )
+
+elif args.task == 'fa_pt':
+    default_labels = {'FA': 0, 'PT': 1}
+    args.n_classes = len(set(default_labels.values()))
+    if args.model_type in ['PAMIL']:
+        dataset = _build_dataset('dataset_csv/hist_custom.csv', '0_1024', default_labels)
+    
 else:
     raise NotImplementedError
 
