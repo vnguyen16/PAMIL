@@ -309,7 +309,7 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
         if args.w_er != 0 and 'loss_er' in instance_dict:
             loss_er = instance_dict['loss_er']
             total_loss += args.w_er * loss_er
-        if args.w_clst != 0:
+        if args.w_clst != 0 and 'loss_clst' in instance_dict:
             loss_clst = instance_dict['loss_clst']
             total_loss += args.w_clst * loss_clst
             
@@ -320,7 +320,7 @@ def train_loop_pamil(epoch, model, loader, optimizer, n_classes, args, writer = 
         elif args.attention_er and 'loss_att_er' in instance_dict:
             loss_att_er = instance_dict['loss_att_er']
             total_loss += args.w_att_er * loss_att_er  # v18
-        if args.w_proto_clst != 0:
+        if args.w_proto_clst != 0 and 'loss_proto_clst' in instance_dict:
             loss_proto_clst = instance_dict['loss_proto_clst']
             total_loss += args.w_proto_clst * loss_proto_clst
         
@@ -424,10 +424,10 @@ def validate_pamil(cur, epoch, model, loader, n_classes, args, early_stopping = 
             
             loss_cls = loss_fn(Y_prob, label_bn.squeeze().float())
             loss = loss_cls
-            if args.w_er != 0:
+            if args.w_er != 0 and 'loss_er' in instance_dict:
                 loss_er = instance_dict['loss_er']
                 loss += args.w_er * loss_er
-            if args.w_clst != 0:
+            if args.w_clst != 0 and 'loss_clst' in instance_dict:
                 loss_clst = instance_dict['loss_clst']
                 loss += args.w_clst * loss_clst
             val_loss += loss.item()
