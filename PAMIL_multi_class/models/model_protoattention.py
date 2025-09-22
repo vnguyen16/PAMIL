@@ -359,60 +359,155 @@ class PAMIL(nn.Module):
 #             save_push_result(epoch=epoch, patients=best_patients, coords=best_cors, save_path=result_dir, cur=cur)
 #     print('Done!')
 
-def push(loader, model, epoch, save_proto=False, result_dir=None, cur=None):  # v26
-    # get the proto_A
-    device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# ---------------------------------------- OG push function
+# def push(loader, model, epoch, save_proto=False, result_dir=None, cur=None):  # v26
+#     # get the proto_A
+#     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # get the prototype <-> class matrix, get the prototype class
-    proto_class_matrix = model.attention_net.attention_c.weight.data
-    proto_class_matrix = proto_class_matrix.detach().cpu()
-    _, proto_class = torch.max(proto_class_matrix, axis=0)
+#     # get the prototype <-> class matrix, get the prototype class
+#     proto_class_matrix = model.attention_net.attention_c.weight.data
+#     proto_class_matrix = proto_class_matrix.detach().cpu()
+#     _, proto_class = torch.max(proto_class_matrix, axis=0)
     
+#     with torch.no_grad():
+#         max_similarity = [-1e5 for _ in range(model.n_protos)]
+#         mid_proto = torch.zeros((model.proto.shape))
+#         best_patients = ['' for _ in range(model.n_protos)]
+#         best_cors = ['' for _ in range(model.n_protos)]
+#         for batch_idx, (data, label, cors, inst_label, slide_id) in enumerate(loader):
+#             data, label = data.to(device), label.to(device)
+#             cors = cors[0]
+#             slide_id = slide_id[0]
+#             label = label[0]
+#             _, _, _, instance_dict = model(data)
+#             proto_A = instance_dict['proto_A']
+#             # get the max similarity with the same label
+
+#             indexs = [-1 for _ in range(model.n_protos)]  # init the indexs            
+#             for i in range(model.n_protos):
+#                 if label == proto_class[i]:
+#                     # get the index 
+#                     p_index = np.where(inst_label == proto_class[i])[0]
+#                     if len(p_index) == 0:
+#                         continue
+#                     row = proto_A[:, i]
+#                     max_index = p_index[torch.argmax(row[p_index])]
+                    
+#                     while max_index in indexs:
+#                         row[max_index] = -1e5
+#                         max_index = p_index[torch.argmax(row[p_index])]
+#                     indexs[i] = max_index
+                
+#                     # save the max similarity patch
+#                     if proto_A[indexs[i], i] > max_similarity[i]:
+#                         max_similarity[i] = proto_A[indexs[i], i]
+#                         mid_proto[i, :] = data[indexs[i], :]
+#                         best_patients[i] = slide_id
+#                         best_cors[i] = cors[indexs[i]]
+#                 else:
+#                     continue
+                    
+#         # push the patches features to the vector
+#         model.proto = torch.nn.Parameter(mid_proto.to(device), requires_grad=True)
+    
+#         # if save the result
+#         if save_proto:
+#             save_push_result(epoch=epoch, patients=best_patients, coords=best_cors, save_path=result_dir, cur=cur)
+#     print('Done!')
+    # ---------------------------------------- OG push function
+
+# ---------------------------------------- 🔴 updated push function to use top-attention patches and instance labels if available
+def push(loader, model, epoch, save_proto=False, result_dir=None, cur=None):
+    import numpy as np
+    import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # prototype -> class mapping from the learned classifier over prototypes
+    proto_class_matrix = model.attention_net.attention_c.weight.data.detach().cpu()  # [C, P]
+    _, proto_class = torch.max(proto_class_matrix, dim=0)  # [P]
+
     with torch.no_grad():
+        # start from existing prototypes; only overwrite when we find a better winner
+        mid_proto = model.proto.detach().clone().cpu()      # [P, D]
         max_similarity = [-1e5 for _ in range(model.n_protos)]
-        mid_proto = torch.zeros((model.proto.shape))
         best_patients = ['' for _ in range(model.n_protos)]
         best_cors = ['' for _ in range(model.n_protos)]
-        for batch_idx, (data, label, cors, inst_label, slide_id) in enumerate(loader):
-            data, label = data.to(device), label.to(device)
-            cors = cors[0]
-            slide_id = slide_id[0]
-            label = label[0]
-            _, _, _, instance_dict = model(data)
-            proto_A = instance_dict['proto_A']
-            # get the max similarity with the same label
 
-            indexs = [-1 for _ in range(model.n_protos)]  # init the indexs            
+        for batch_idx, (data, label, cors, inst_label, slide_id) in enumerate(loader):
+            data = data.to(device)
+            label = label.to(device)
+            slide = slide_id[0]
+            coords = cors[0]
+            # slide-level class (int)
+            y = int(label.item()) if label.ndim == 0 else int(label[0].item())
+
+            # forward once to get proto similarities and attention
+            _, _, _, instance_dict = model(data)
+            proto_A = instance_dict['proto_A']      # [N, P] (patch x proto similarities)
+            A_raw   = instance_dict['A_raw']        # [C, N] (class x patch attention logits)
+
+            # normalize inst_label to a numpy array if present
+            inst_arr = None
+            if isinstance(inst_label, torch.Tensor):
+                inst_arr = inst_label.detach().cpu().numpy()
+            elif isinstance(inst_label, (list, tuple)):
+                # common packing is [arr] at index 0
+                inst_arr = inst_label[0] if len(inst_label) > 0 else None
+                if isinstance(inst_arr, torch.Tensor):
+                    inst_arr = inst_arr.detach().cpu().numpy()
+                elif isinstance(inst_arr, list):
+                    inst_arr = np.array(inst_arr)
+            elif inst_label is not None:
+                try:
+                    inst_arr = np.array(inst_label)
+                except Exception:
+                    inst_arr = None
+
+            N = proto_A.size(0)
+
             for i in range(model.n_protos):
-                if label == proto_class[i]:
-                    # get the index 
-                    p_index = np.where(inst_label == proto_class[i])[0]
-                    if len(p_index) == 0:
-                        continue
-                    row = proto_A[:, i]
-                    max_index = p_index[torch.argmax(row[p_index])]
-                    
-                    while max_index in indexs:
-                        row[max_index] = -1e5
-                        max_index = p_index[torch.argmax(row[p_index])]
-                    indexs[i] = max_index
-                
-                    # save the max similarity patch
-                    if proto_A[indexs[i], i] > max_similarity[i]:
-                        max_similarity[i] = proto_A[indexs[i], i]
-                        mid_proto[i, :] = data[indexs[i], :]
-                        best_patients[i] = slide_id
-                        best_cors[i] = cors[indexs[i]]
-                else:
+                # only consider this slide if its class matches the prototype's class
+                if y != int(proto_class[i]):
                     continue
-                    
-        # push the patches features to the vector
+
+                # --- candidate index set (p_index) ---
+                if inst_arr is not None and inst_arr.size > 0:
+                    # true instance labels present: restrict to same-class patches
+                    candidates = np.where(inst_arr == int(proto_class[i]))[0]
+                else:
+                    # no instance labels: use top-attention patches for this slide/class
+                    att = A_raw[y].detach().cpu()       # [N]
+                    K = min(int(att.numel()), 512)      # cap to avoid scanning all N
+                    if K > 0:
+                        candidates = torch.topk(att, k=K).indices.cpu().numpy()
+                    else:
+                        candidates = np.arange(N)
+
+                if candidates.size == 0:
+                    continue
+
+                # pick best by proto similarity among candidates
+                row = proto_A[:, i].detach().cpu()      # [N]
+                cand_vals = row[candidates]
+                j_local = int(torch.argmax(cand_vals).item())
+                j = int(candidates[j_local])
+
+                if float(row[j].item()) > max_similarity[i]:
+                    max_similarity[i] = float(row[j].item())
+                    mid_proto[i, :] = data[j, :].detach().cpu()
+                    best_patients[i] = slide
+                    best_cors[i] = coords[j]
+
+        # commit updates (prototypes without winners remain unchanged)
         model.proto = torch.nn.Parameter(mid_proto.to(device), requires_grad=True)
-    
-        # if save the result
+
         if save_proto:
-            save_push_result(epoch=epoch, patients=best_patients, coords=best_cors, save_path=result_dir, cur=cur)
-    print('Done!')
+            save_push_result(epoch=epoch, patients=best_patients, coords=best_cors,
+                             save_path=result_dir, cur=cur)
+    print("Done!")
+# ------ updated push function to use top-attention patches and instance labels if available
+# ---------------------------------------- 🔴 
+
     
 def save_push_result(epoch, patients, coords, save_path='result_folder/pmil_result/', cur=None):
     # save_path = result_folder/pmil_result/global_proto.h5
