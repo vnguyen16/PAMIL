@@ -196,6 +196,7 @@ def train(datasets, cur, args):
         iteration = 0
         warm_only(model)
         while True:
+            stop = False # -- 🔴
             if mode == TrainMode.WARM:
                 train_loop_pamil(epoch, model, train_loader, optimizer, args.n_classes, args, writer, loss_fn)
                 stop = validate_pamil(cur, epoch, model, val_loader, args.n_classes, args,
@@ -226,8 +227,8 @@ def train(datasets, cur, args):
                     mode = TrainMode.JOINT
                     iteration = 0
                 
-            if epoch >= configs.num_train_epochs:
-            # if epoch >= configs.num_train_epochs or stop:
+            # if epoch >= configs.num_train_epochs:
+            if epoch >= configs.num_train_epochs or stop:  # -- 🔴
                 break
     # save the final results
     torch.save(model.state_dict(), os.path.join(args.results_dir, "s_{}_final_checkpoint.pt".format(cur)))
